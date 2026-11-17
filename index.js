@@ -4,32 +4,42 @@ export default {
       return new Response("Telegram-Grok proxy is running", { status: 200 });
     }
 
-    const body = await request.arrayBuffer();
-    const bodyBytes = new Uint8Array(body);
+    const bodyBuffer = await request.arrayBuffer();
+    const bodyBytes = new Uint8Array(bodyBuffer);
 
     const WEBHOOK_URL = env.GROK_WEBHOOK_URL || "https://grok.com/webhook/automation/5e953af6-6479-4833-935e-f0ebbc702b13";
     const SECRET = env.GROK_WEBHOOK_SECRET || "whsec_9NlIiV+auFQQu9vBjnulIXf+8/Ng1ROhlLmRtkb0VPQ=";
 
-    const secretBytes = Uint8Array.from(atob(SECRET.split("_")[1]), c => c.charCodeAt(0));
+    // secret 처리
+    const secretB64 = SECRET.startsWith("whsec_") ? SECRET.slice(6) : SECRET;
+    const secretBytes = Uint8Array.from(atob(secretB64), c => c.charCodeAt(0));
+
     const webhookId = crypto.randomUUID();
     const timestamp = Math.floor(Date.now() / 1000).toString();
-    const toSign = new TextEncoder().encode(`${webhookId}.${timestamp}.`);
-    const fullToSign = new Uint8Array(toSign.length + bodyBytes.length);
-    fullToSign.set(toSign);
-    fullToSign.set(bodyBytes, toSign.length);
+
+    // toSign = id.timestamp.body
+    const prefix = new TextEncoder().encode(`${webhookId}.${timestamp}.`);
+    const toSign = new Uint8Array(prefix.length + bodyBytes.length);
+    toSign.set(prefix, 0);
+    toSign.set(bodyBytes, prefix.length);
 
     const key = await crypto.subtle.importKey(
-      "raw", secretBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+      "raw",
+      secretBytes,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
     );
-    const signatureBuf = await crypto.subtle.sign("HMAC", key, fullToSign);
-    const signature = btoa(String.fromCharCode(...new Uint8Array(signatureBuf)));
 
-    const headers = {
+    const sigBuffer = await crypto.subtle.sign("HMAC", key, toSign);
+    const signature = btoa(String.fromCharCode(...new Uint8Array(sigBuffer)));
+
+    const headers = new Headers({
       "webhook-id": webhookId,
       "webhook-timestamp": timestamp,
       "webhook-signature": `v1,${signature}`,
       "Content-Type": "application/json",
-    };
+    });
 
     try {
       const resp = await fetch(WEBHOOK_URL, {
@@ -37,9 +47,13 @@ export default {
         headers,
         body: bodyBytes,
       });
-      return new Response(await resp.text(), { status: resp.status });
-    } catch (e) {
-      return new Response(String(e), { status: 500 });
+
+      return new Response(await resp.text(), {
+        status: resp.status,
+        headers: { "Content-Type": "text/plain" },
+      });
+    } catch (err) {
+      return new Response("Proxy error: " + err.message, { status: 500 });
     }
   },
 };
