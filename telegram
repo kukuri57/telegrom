@@ -1,0 +1,46 @@
+export default {
+  async fetch(request, env) {
+    if (request.method !== "POST") {
+      return new Response("Telegram-Grok proxy is running", { status: 200 });
+    }
+
+    const body = await request.arrayBuffer();
+    const bodyBytes = new Uint8Array(body);
+
+    const WEBHOOK_URL = env.GROK_WEBHOOK_URL || "https://grok.com/webhook/automation/5e953af6-6479-4833-935e-f0ebbc702b13";
+    const SECRET = env.GROK_WEBHOOK_SECRET || "whsec_9NlIiV+auFQQu9vBjnulIXf+8/Ng1ROhlLmRtkb0VPQ=";
+
+    // 서명 생성
+    const secretBytes = Uint8Array.from(atob(SECRET.split("_")[1]), c => c.charCodeAt(0));
+    const webhookId = crypto.randomUUID();
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const toSign = new TextEncoder().encode(`${webhookId}.${timestamp}.`);
+    const fullToSign = new Uint8Array(toSign.length + bodyBytes.length);
+    fullToSign.set(toSign);
+    fullToSign.set(bodyBytes, toSign.length);
+
+    const key = await crypto.subtle.importKey(
+      "raw", secretBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+    );
+    const signatureBuf = await crypto.subtle.sign("HMAC", key, fullToSign);
+    const signature = btoa(String.fromCharCode(...new Uint8Array(signatureBuf)));
+
+    const headers = {
+      "webhook-id": webhookId,
+      "webhook-timestamp": timestamp,
+      "webhook-signature": `v1,${signature}`,
+      "Content-Type": "application/json",
+    };
+
+    try {
+      const resp = await fetch(WEBHOOK_URL, {
+        method: "POST",
+        headers,
+        body: bodyBytes,
+      });
+      return new Response(await resp.text(), { status: resp.status });
+    } catch (e) {
+      return new Response(String(e), { status: 500 });
+    }
+  },
+};
